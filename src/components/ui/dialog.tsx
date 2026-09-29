@@ -117,4 +117,6 @@ export function DialogDescription({ className, ...props }: React.ComponentProps<
   return <p data-slot="dialog-description" className={cn('text-sm text-muted-foreground', className)} {...props} />
 }
 
-export { DialogClose: () => null }
+export function DialogClose() {
+  return null
+}
