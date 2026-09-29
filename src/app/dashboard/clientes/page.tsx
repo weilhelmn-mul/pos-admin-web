@@ -1,6 +1,5 @@
 'use client'
-import { useEffect, useMemo, useState } from 'react'
-import { collection, getDocs } from 'firebase/firestore'
+import { useMemo, useState } from 'react'
 import {
   Users,
   Search,
@@ -11,8 +10,9 @@ import {
   Building2,
   User,
   X,
+  Radio,
 } from 'lucide-react'
-import { db } from '@/lib/firebase'
+import { useFirestoreLive, formatRelativeTime } from '@/hooks/use-firestore-live'
 import { formatCurrency } from '@/lib/format'
 import { exportCustomersToCSV } from '@/lib/export'
 import {
@@ -64,31 +64,10 @@ interface Customer {
 }
 
 export default function ClientesPage() {
-  const [customers, setCustomers] = useState<Customer[]>([])
-  const [loading, setLoading] = useState(true)
   const [search, setSearch] = useState('')
   const [docFilter, setDocFilter] = useState('all')
-
-  const load = async () => {
-    if (!db) {
-      toast.error({ title: 'Firebase no configurado' })
-      setLoading(false)
-      return
-    }
-    try {
-      const snap = await getDocs(collection(db, 'customers'))
-      const items = snap.docs.map((d) => ({ id: d.id, ...(d.data() as any) })) as Customer[]
-      setCustomers(items)
-    } catch (e: any) {
-      toast.error({ title: 'Error al cargar clientes', description: e?.message })
-    } finally {
-      setLoading(false)
-    }
-  }
-
-  useEffect(() => {
-    load()
-  }, [])
+  // Tiempo real via onSnapshot + polling 60s de respaldo
+  const { data: customers, loading, lastUpdated, refresh, live } = useFirestoreLive<Customer>('customers', { pollIntervalMs: 60000 })
 
   const filtered = useMemo(() => {
     const q = search.trim().toLowerCase()
@@ -133,8 +112,13 @@ export default function ClientesPage() {
             {filtered.length} de {total} clientes
           </p>
         </div>
-        <div className="flex gap-2">
-          <Button variant="outline" onClick={load} disabled={loading}>
+        <div className="flex gap-2 items-center">
+          <Badge variant="outline" className={`gap-1.5 ${live ? 'text-emerald-600' : 'text-muted-foreground'}`}>
+            <Radio className={`size-3 ${live ? 'animate-pulse' : ''}`} />
+            {live ? 'En vivo' : 'Polling 60s'}
+            {lastUpdated && <span className="text-[10px] text-muted-foreground">· {formatRelativeTime(lastUpdated)}</span>}
+          </Badge>
+          <Button variant="outline" onClick={refresh} disabled={loading}>
             <RefreshCw className={loading ? 'size-4 animate-spin' : 'size-4'} />
             Refrescar
           </Button>

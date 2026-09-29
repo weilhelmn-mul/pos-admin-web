@@ -1,6 +1,5 @@
 'use client'
 import { useEffect, useState } from 'react'
-import { collection, getDocs } from 'firebase/firestore'
 import {
   ShoppingCart,
   DollarSign,
@@ -11,9 +10,10 @@ import {
   AlertCircle,
   CheckCircle2,
   Activity,
+  Radio,
 } from 'lucide-react'
-import { db } from '@/lib/firebase'
 import { useAuth } from '@/hooks/use-auth'
+import { useFirestoreLive, formatRelativeTime } from '@/hooks/use-firestore-live'
 import { formatCurrency, formatDateTime } from '@/lib/format'
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card'
 import { Button } from '@/components/ui/button'
@@ -56,41 +56,23 @@ interface DashboardData {
 
 export default function DashboardPage() {
   const { user } = useAuth()
-  const [data, setData] = useState<DashboardData | null>(null)
-  const [loading, setLoading] = useState(true)
   const [syncing, setSyncing] = useState(false)
-
-  const load = async () => {
-    if (!db) {
-      toast.error({ title: 'Firebase no configurado', description: 'Verifica variables NEXT_PUBLIC_FIREBASE_*' })
-      setLoading(false)
-      return
-    }
-    try {
-      const [salesSnap, productsSnap, customersSnap] = await Promise.all([
-        getDocs(collection(db, 'sales')),
-        getDocs(collection(db, 'products')),
-        getDocs(collection(db, 'customers')),
-      ])
-      const sales: SaleDoc[] = salesSnap.docs.map((d) => ({ id: d.id, ...(d.data() as any) }))
-      const products: ProductDoc[] = productsSnap.docs.map((d) => ({ id: d.id, ...(d.data() as any) }))
-      const customers: CustomerDoc[] = customersSnap.docs.map((d) => ({ id: d.id, ...(d.data() as any) }))
-      setData({ sales, products, customers })
-    } catch (e: any) {
-      toast.error({ title: 'Error al cargar datos', description: e?.message })
-    } finally {
-      setLoading(false)
-    }
-  }
-
-  useEffect(() => {
-    load()
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [])
+  // Tiempo real via onSnapshot + polling 60s de respaldo
+  const salesHook = useFirestoreLive<SaleDoc>('sales', { pollIntervalMs: 60000 })
+  const productsHook = useFirestoreLive<ProductDoc>('products', { pollIntervalMs: 60000 })
+  const customersHook = useFirestoreLive<CustomerDoc>('customers', { pollIntervalMs: 60000 })
+  const loading = salesHook.loading || productsHook.loading || customersHook.loading
+  const data: DashboardData | null = (salesHook.data.length || productsHook.data.length || customersHook.data.length)
+    ? { sales: salesHook.data, products: productsHook.data, customers: customersHook.data }
+    : null
+  const lastUpdated = [salesHook.lastUpdated, productsHook.lastUpdated, customersHook.lastUpdated]
+    .filter(Boolean)
+    .sort((a, b) => b!.getTime() - a!.getTime())[0] || null
+  const live = salesHook.live || productsHook.live || customersHook.live
 
   const handleRefresh = async () => {
     setSyncing(true)
-    await load()
+    await Promise.all([salesHook.refresh(), productsHook.refresh(), customersHook.refresh()])
     setSyncing(false)
     toast.success({ title: 'Actualizado', description: 'Datos refrescados desde Firestore' })
   }
@@ -151,10 +133,18 @@ export default function DashboardPage() {
             Hola <span className="font-medium">{user?.displayName || user?.email}</span>. Vista de tu negocio.
           </p>
         </div>
-        <Button variant="outline" onClick={handleRefresh} disabled={syncing}>
-          <RefreshCw className={syncing ? 'size-4 animate-spin' : 'size-4'} />
-          Actualizar
-        </Button>
+        <div className="flex items-center gap-3">
+          {/* Indicador tiempo real */}
+          <Badge variant="outline" className={`gap-1.5 ${live ? 'text-emerald-600' : 'text-muted-foreground'}`}>
+            <Radio className={`size-3 ${live ? 'animate-pulse' : ''}`} />
+            {live ? 'En vivo' : 'Polling 60s'}
+            {lastUpdated && <span className="text-[10px] text-muted-foreground">· {formatRelativeTime(lastUpdated)}</span>}
+          </Badge>
+          <Button variant="outline" onClick={handleRefresh} disabled={syncing}>
+            <RefreshCw className={syncing ? 'size-4 animate-spin' : 'size-4'} />
+            Actualizar
+          </Button>
+        </div>
       </header>
 
       {/* Stat cards */}
