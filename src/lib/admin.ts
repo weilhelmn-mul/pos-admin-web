@@ -1,42 +1,65 @@
-import * as admin from 'firebase-admin'
+import { initializeApp, getApps, cert, type App } from 'firebase-admin/app'
+import { getFirestore, type Firestore } from 'firebase-admin/firestore'
 
-let app: admin.app.App | null = null
+let app: App | null = null
+let db: Firestore | null = null
 
 /**
- * Returns a Firebase Admin Firestore instance configured from
- * the FIREBASE_SERVICE_ACCOUNT environment variable (JSON string).
- * Caches the app so initialization happens only once per process.
+ * Inicializa Firebase Admin SDK desde la variable de entorno FIREBASE_SERVICE_ACCOUNT.
+ * Cachea la instancia para reutilizarla entre invocaciones (Vercel serverless).
  */
-export function getAdminApp(): admin.app.App {
+export function getAdminApp(): App {
   if (app) return app
+
+  // Reutilizar app existente si ya está inicializada
+  if (getApps().length > 0) {
+    app = getApps()[0]!
+    return app
+  }
+
   const sa = process.env.FIREBASE_SERVICE_ACCOUNT
   if (!sa) {
     throw new Error('FIREBASE_SERVICE_ACCOUNT no configurada en variables de entorno')
   }
-  let serviceAccount: admin.ServiceAccount
+
+  let serviceAccount: {
+    projectId: string
+    privateKey: string
+    clientEmail: string
+  }
+
   try {
-    serviceAccount = JSON.parse(sa)
-  } catch (e) {
-    throw new Error('FIREBASE_SERVICE_ACCOUNT no es un JSON válido')
+    const parsed = JSON.parse(sa)
+    // Normalizar: las keys del JSON de service account vienen en camelCase
+    serviceAccount = {
+      projectId: parsed.project_id || parsed.projectId,
+      privateKey: parsed.private_key || parsed.privateKey,
+      clientEmail: parsed.client_email || parsed.clientEmail,
+    }
+    if (!serviceAccount.projectId || !serviceAccount.privateKey || !serviceAccount.clientEmail) {
+      throw new Error('Service account incompleta: faltan projectId/privateKey/clientEmail')
+    }
+  } catch (e: any) {
+    throw new Error(`FIREBASE_SERVICE_ACCOUNT inválida: ${e.message}`)
   }
-  if (admin.apps.length > 0) {
-    app = admin.apps[0] as admin.app.App
-    return app
-  }
-  app = admin.initializeApp({
-    credential: admin.credential.cert(serviceAccount),
+
+  app = initializeApp({
+    credential: cert({
+      projectId: serviceAccount.projectId,
+      privateKey: serviceAccount.privateKey.replace(/\\n/g, '\n'),
+      clientEmail: serviceAccount.clientEmail,
+    }),
     projectId: serviceAccount.projectId,
-    storageBucket: process.env.NEXT_PUBLIC_FIREBASE_STORAGE_BUCKET || undefined,
   })
+
   return app
 }
 
-export function getAdminDb(): admin.firestore.Firestore {
-  return admin.firestore(getAdminApp())
-}
-
-export function getAdminAuth(): admin.auth.Auth {
-  return admin.auth(getAdminApp())
+export function getAdminDb(): Firestore {
+  if (db) return db
+  const app = getAdminApp()
+  db = getFirestore(app)
+  return db
 }
 
 export function isFirebaseAdminConfigured(): boolean {
