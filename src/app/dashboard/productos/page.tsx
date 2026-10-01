@@ -68,7 +68,10 @@ export default function ProductosPage() {
   const [category, setCategory] = useState('all')
   const [stockFilter, setStockFilter] = useState('all')
   // Tiempo real via onSnapshot + polling 60s de respaldo
-  const { data: products, loading, lastUpdated, refresh, live } = useFirestoreLive<Product>('products', { pollIntervalMs: 60000 })
+  const { data: allProducts, loading, lastUpdated, refresh, live } = useFirestoreLive<Product>('products', { pollIntervalMs: 60000 })
+  // Filtrar productos eliminados (soft-delete: status='discontinued')
+  // para que no aparezcan en la lista ni en los stats
+  const products = useMemo(() => allProducts.filter((p) => p.status !== 'discontinued'), [allProducts])
 
   const categories = useMemo(() => {
     const set = new Set<string>()

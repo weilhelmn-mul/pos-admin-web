@@ -111,8 +111,10 @@ export default function DashboardPage() {
   const productsHook = useFirestoreLive<ProductDoc>('products', { pollIntervalMs: 60000 })
   const customersHook = useFirestoreLive<CustomerDoc>('customers', { pollIntervalMs: 60000 })
   const loading = salesHook.loading || productsHook.loading || customersHook.loading
-  const data: DashboardData | null = (salesHook.data.length || productsHook.data.length || customersHook.data.length)
-    ? { sales: salesHook.data, products: productsHook.data, customers: customersHook.data }
+  // Filtrar productos eliminados (soft-delete: status='discontinued') de los stats
+  const activeProducts = productsHook.data.filter((p) => (p as any).status !== 'discontinued')
+  const data: DashboardData | null = (salesHook.data.length || activeProducts.length || customersHook.data.length)
+    ? { sales: salesHook.data, products: activeProducts, customers: customersHook.data }
     : null
   const lastUpdated = [salesHook.lastUpdated, productsHook.lastUpdated, customersHook.lastUpdated]
     .filter(Boolean)
