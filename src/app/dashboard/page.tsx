@@ -15,6 +15,10 @@ import {
 import { useAuth } from '@/hooks/use-auth'
 import { useFirestoreLive, formatRelativeTime } from '@/hooks/use-firestore-live'
 import { formatCurrency, formatDateTime } from '@/lib/format'
+import {
+  toDate, getInvoiceNumber, getCustomerName, isSaleActive,
+  isThisMonthAny, getItemName, getProductPrice, isTodayAny,
+} from '@/lib/normalize'
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card'
 import { Button } from '@/components/ui/button'
 import { Badge } from '@/components/ui/badge'
@@ -23,22 +27,67 @@ import { toast } from '@/components/ui/toaster'
 
 interface SaleDoc {
   id: string
-  number?: string
+  // POS Pro guarda: invoiceNumber, createdAt, paymentMethod, customerId, customerName (a agregar)
+  // La web debe leer estos campos reales, NO number/date
+  invoiceNumber?: string
+  number?: string // alias legacy
   total?: number
-  date?: any
-  createdAt?: any
+  subtotal?: number
+  tax?: number
+  discount?: number
+  date?: any // alias legacy para createdAt
+  createdAt?: any // campo real que usa POS Pro
+  updatedAt?: any
   status?: string
-  customerName?: string
+  customerId?: string | null
+  customerName?: string // Se agregará en sync-service.ts del POS Pro
+  customerDoc?: string
+  userId?: string
   paymentMethod?: string
+  paymentDetails?: any
+  items?: Array<{
+    id?: string
+    productId?: string
+    name?: string
+    productName?: string
+    quantity?: number
+    unitPrice?: number
+    price?: number // alias legacy
+    discount?: number
+    total?: number
+  }>
+  payments?: Array<{ id?: string; method?: string; amount?: number; reference?: string; createdAt?: any }>
+  paidAmount?: number
+  creditBalance?: number
+  observations?: string
+  notes?: string
+  voidedAt?: any
+  voidReason?: string
+  source?: string
+  syncStatus?: string
   syncedAt?: any
+  syncedBy?: string
+  externalId?: string
 }
 
 interface ProductDoc {
   id: string
   name?: string
-  price?: number
+  barcode?: string
+  sku?: string
+  // POS Pro usa 'salePrice' en el schema. La web debe respetar este nombre.
+  salePrice?: number
+  price?: number // alias legacy (algunos productos viejos pueden tener price)
+  cost?: number // POS Pro no lo sube a Firebase, se calcula 0 si no existe
+  purchasePrice?: number
   stock?: number
+  minStock?: number
   category?: string
+  categoryName?: string
+  status?: string
+  image?: string
+  imageUrl?: string
+  unit?: string
   syncedAt?: any
 }
 
@@ -78,38 +127,48 @@ export default function DashboardPage() {
   }
 
   const totalSales = data?.sales.length ?? 0
+  // Total revenue = suma de ventas activas (no anuladas/canceladas)
   const totalRevenue =
     data?.sales
-      .filter((s) => s.status !== 'voided' && s.status !== 'cancelled')
+      .filter((s) => isSaleActive(s))
       .reduce((sum, s) => sum + Number(s.total || 0), 0) ?? 0
 
-  // Current month revenue
-  const now = new Date()
+  // Revenue del mes actual (zona horaria Lima/Perú)
+  const todayRevenue =
+    data?.sales
+      .filter((s) => isSaleActive(s) && isTodayAny(s.createdAt || s.date))
+      .reduce((sum, s) => sum + Number(s.total || 0), 0) ?? 0
   const monthRevenue =
     data?.sales
-      .filter((s) => {
-        const d = s.date?.toDate ? s.date.toDate() : s.date ? new Date(s.date) : null
-        return d && d.getMonth() === now.getMonth() && d.getFullYear() === now.getFullYear()
-      })
+      .filter((s) => isSaleActive(s) && isThisMonthAny(s.createdAt || s.date))
       .reduce((sum, s) => sum + Number(s.total || 0), 0) ?? 0
+  const salesToday =
+    data?.sales.filter((s) => isTodayAny(s.createdAt || s.date)).length ?? 0
 
   const totalProducts = data?.products.length ?? 0
+  const lowStockCount = data?.products.filter((p) => {
+    const stock = Number(p.stock ?? 0)
+    const min = Number(p.minStock ?? 0)
+    return stock > 0 && stock <= min
+  }).length ?? 0
   const totalCustomers = data?.customers.length ?? 0
 
+  // Ventas recientes = últimas 5 ordenadas por createdAt (realmente guardado por POS Pro)
   const recentSales = [...(data?.sales || [])]
     .sort((a, b) => {
-      const da = a.date?.toDate ? a.date.toDate() : a.date ? new Date(a.date as any) : new Date(0)
-      const db2 = b.date?.toDate ? b.date.toDate() : b.date ? new Date(b.date as any) : new Date(0)
-      return db2.getTime() - da.getTime()
+      const da = toDate(a.createdAt || a.date)
+      const db2 = toDate(b.createdAt || b.date)
+      return (db2?.getTime() || 0) - (da?.getTime() || 0)
     })
     .slice(0, 5)
 
-  // Top products by units sold
+  // Top productos por unidades vendidas
   const productUnits = new Map<string, { name: string; units: number }>()
   for (const s of data?.sales || []) {
+    if (!isSaleActive(s)) continue
     const items = (s as any).items || []
     for (const it of items) {
-      const name = it.name || it.productName || 'Producto'
+      const name = getItemName(it)
       const qty = Number(it.quantity || 0)
       const cur = productUnits.get(name) || { name, units: 0 }
       cur.units += qty
@@ -120,9 +179,9 @@ export default function DashboardPage() {
     .sort((a, b) => b.units - a.units)
     .slice(0, 5)
 
-  const syncedSales = data?.sales.filter((s) => s.syncedAt).length ?? 0
-  const syncedProducts = data?.products.filter((p) => p.syncedAt).length ?? 0
-  const syncedCustomers = data?.customers.filter((c) => c.syncedAt).length ?? 0
+  const syncedSales = data?.sales.filter((s) => s.syncedAt || s.syncStatus === 'synced').length ?? 0
+  const syncedProducts = data?.products.filter((p) => p.syncedAt || p.syncStatus === 'synced').length ?? 0
+  const syncedCustomers = data?.customers.filter((c) => c.syncedAt || c.syncStatus === 'synced').length ?? 0
 
   return (
     <div className="flex flex-col gap-6 p-4 sm:p-6 lg:p-8">
@@ -161,7 +220,7 @@ export default function DashboardPage() {
           value={loading ? null : formatCurrency(monthRevenue)}
           icon={DollarSign}
           color="amber"
-          hint={now.toLocaleString('es-PE', { month: 'long', year: 'numeric' })}
+          hint={`${formatCurrency(todayRevenue)} hoy · ${salesToday} venta(s) hoy`}
         />
         <StatCard
           title="Productos"
@@ -203,15 +262,15 @@ export default function DashboardPage() {
             ) : (
               <ul className="divide-y">
                 {recentSales.map((s) => {
-                  const d = s.date?.toDate ? s.date.toDate() : s.date ? new Date(s.date as any) : null
+                  const d = toDate(s.createdAt || s.date)
                   return (
                     <li key={s.id} className="flex items-center justify-between py-3">
                       <div className="min-w-0">
                         <p className="truncate text-sm font-medium">
-                          {s.number || s.id.slice(0, 8)}
+                          {getInvoiceNumber(s)}
                         </p>
                         <p className="truncate text-xs text-muted-foreground">
-                          {s.customerName || 'Cliente contado'} ·{' '}
+                          {getCustomerName(s, data?.customers || [])} ·{' '}
                           {d ? formatDateTime(d) : '—'}
                         </p>
                       </div>

@@ -14,6 +14,10 @@ import { useFirestoreLive, formatRelativeTime } from '@/hooks/use-firestore-live
 import { formatCurrency, formatDateTime } from '@/lib/format'
 import { exportSalesToCSV } from '@/lib/export'
 import {
+  toDate, getInvoiceNumber, getCustomerName, getCustomerDoc,
+  getItemName, getItemUnitPrice, isSaleActive, isTodayAny,
+} from '@/lib/normalize'
+import {
   Card,
   CardContent,
   CardDescription,
@@ -51,23 +55,33 @@ import { toast } from '@/components/ui/toaster'
 
 interface Sale {
   id: string
-  number?: string
+  // Campos reales guardados por POS Pro:
   externalId?: string
-  date?: any
-  createdAt?: any
+  invoiceNumber?: string  // POS Pro usa este (NO 'number')
+  number?: string         // alias legacy
+  date?: any             // alias legacy para createdAt
+  createdAt?: any        // campo real que usa POS Pro (Firestore Timestamp)
+  updatedAt?: any
   total?: number
   subtotal?: number
   tax?: number
   igv?: number
+  discount?: number
   status?: string
   paymentMethod?: string
-  customerName?: string
+  customerId?: string | null
+  customerName?: string  // Se agregará en sync-service del POS Pro
   customerDoc?: string
   customer?: { name?: string; document?: string }
-  items?: Array<{ name?: string; productName?: string; quantity?: number; price?: number; unitPrice?: number; subtotal?: number }>
+  items?: Array<{ id?: string; productId?: string; name?: string; productName?: string; quantity?: number; unitPrice?: number; price?: number; subtotal?: number; discount?: number; total?: number }>
+  payments?: Array<{ id?: string; method?: string; amount?: number; reference?: string; createdAt?: any }>
   userId?: string
+  userName?: string      // Se agregará en sync-service del POS Pro
   vendedor?: string
   syncedAt?: any
+  syncStatus?: string
+  syncedBy?: string
+  source?: string
   [k: string]: any
 }
 
@@ -93,19 +107,24 @@ export default function VentasPage() {
     const q = search.trim().toLowerCase()
     return sales
       .filter((s) => {
+        // Soporta ambos nombres: invoiceNumber (real POS Pro) y number (legacy)
+        const invNum = getInvoiceNumber(s).toLowerCase()
+        const custName = getCustomerName(s).toLowerCase()
+        const custDoc = getCustomerDoc(s).toLowerCase()
         const matchesSearch =
           !q ||
-          (s.number || '').toLowerCase().includes(q) ||
-          (s.customerName || s.customer?.name || '').toLowerCase().includes(q) ||
-          (s.customerDoc || s.customer?.document || '').toLowerCase().includes(q) ||
+          invNum.includes(q) ||
+          custName.includes(q) ||
+          custDoc.includes(q) ||
           (s.id || '').toLowerCase().includes(q)
         const matchesStatus = status === 'all' || (s.status || '').toLowerCase() === status
         return matchesSearch && matchesStatus
       })
       .sort((a, b) => {
-        const da = a.date?.toDate ? a.date.toDate() : a.date ? new Date(a.date) : new Date(0)
-        const db2 = b.date?.toDate ? b.date.toDate() : b.date ? new Date(b.date) : new Date(0)
-        return db2.getTime() - da.getTime()
+        // Usa createdAt (real) con fallback a date (legacy)
+        const da = toDate(a.createdAt || a.date)
+        const db2 = toDate(b.createdAt || b.date)
+        return (db2?.getTime() || 0) - (da?.getTime() || 0)
       })
   }, [sales, search, status])
 
@@ -118,7 +137,9 @@ export default function VentasPage() {
     toast.success({ title: 'CSV generado', description: `${filtered.length} ventas exportadas` })
   }
 
-  const totalAmount = filtered.reduce((sum, s) => sum + Number(s.total || 0), 0)
+  const totalAmount = filtered.filter(isSaleActive).reduce((sum, s) => sum + Number(s.total || 0), 0)
+  const todayCount = filtered.filter((s) => isTodayAny(s.createdAt || s.date)).length
+  const todayTotal = filtered.filter((s) => isSaleActive(s) && isTodayAny(s.createdAt || s.date)).reduce((sum, s) => sum + Number(s.total || 0), 0)
 
   return (
     <div className="flex flex-col gap-6 p-4 sm:p-6 lg:p-8">
@@ -126,7 +147,7 @@ export default function VentasPage() {
         <div>
           <h1 className="text-2xl font-bold tracking-tight">Ventas</h1>
           <p className="text-sm text-muted-foreground">
-            {filtered.length} ventas · Total {formatCurrency(totalAmount)}
+            {filtered.length} ventas · Total {formatCurrency(totalAmount)} · Hoy {todayCount} ({formatCurrency(todayTotal)})
           </p>
         </div>
         <div className="flex gap-2 items-center">
@@ -220,20 +241,20 @@ export default function VentasPage() {
                   </TableHeader>
                   <TableBody>
                     {filtered.map((s) => {
-                      const d = s.date?.toDate ? s.date.toDate() : s.date ? new Date(s.date) : null
+                      const d = toDate(s.createdAt || s.date)
                       return (
                         <TableRow key={s.id}>
                           <TableCell className="font-mono text-xs">
-                            {s.number || s.id.slice(0, 8)}
+                            {getInvoiceNumber(s)}
                           </TableCell>
                           <TableCell className="text-xs">
                             {d ? formatDateTime(d) : '—'}
                           </TableCell>
                           <TableCell className="text-sm">
-                            {s.customerName || s.customer?.name || 'Cliente contado'}
+                            {getCustomerName(s)}
                           </TableCell>
                           <TableCell className="text-xs text-muted-foreground">
-                            {s.customerDoc || s.customer?.document || '—'}
+                            {getCustomerDoc(s)}
                           </TableCell>
                           <TableCell className="text-xs">
                             <Badge variant="secondary">{s.paymentMethod || '—'}</Badge>
@@ -271,12 +292,11 @@ export default function VentasPage() {
           <DialogHeader>
             <DialogTitle>Detalle de venta</DialogTitle>
             <DialogDescription>
-              {selected?.number || selected?.id?.slice(0, 8)} ·{' '}
-              {selected?.date?.toDate
-                ? formatDateTime(selected.date.toDate())
-                : selected?.date
-                ? formatDateTime(new Date(selected.date))
-                : '—'}
+              {selected ? getInvoiceNumber(selected) : ''} ·{' '}
+              {(() => {
+                const d = selected ? toDate(selected.createdAt || selected.date) : null
+                return d ? formatDateTime(d) : '—'
+              })()}
             </DialogDescription>
           </DialogHeader>
           {selected && <SaleDetail sale={selected} />}
@@ -288,17 +308,18 @@ export default function VentasPage() {
 
 function SaleDetail({ sale }: { sale: Sale }) {
   const items = Array.isArray(sale.items) ? sale.items : []
+  const syncedAtDate = toDate(sale.syncedAt)
   return (
     <div className="flex flex-col gap-4">
       <div className="grid grid-cols-2 gap-3 text-sm">
-        <Field label="Cliente" value={sale.customerName || sale.customer?.name || 'Cliente contado'} />
-        <Field label="Documento" value={sale.customerDoc || sale.customer?.document || '—'} />
+        <Field label="Cliente" value={getCustomerName(sale)} />
+        <Field label="Documento" value={getCustomerDoc(sale)} />
         <Field label="Método de pago" value={sale.paymentMethod || '—'} />
         <Field label="Estado" value={sale.status || '—'} />
-        <Field label="Vendedor" value={sale.userId || sale.vendedor || '—'} />
+        <Field label="Vendedor" value={sale.userName || sale.vendedor || sale.userId || '—'} />
         <Field
           label="Sincronizado"
-          value={sale.syncedAt ? formatDateTime(sale.syncedAt.toDate ? sale.syncedAt.toDate() : new Date(sale.syncedAt)) : '—'}
+          value={syncedAtDate ? formatDateTime(syncedAtDate) : '—'}
         />
       </div>
 
@@ -316,10 +337,10 @@ function SaleDetail({ sale }: { sale: Sale }) {
               </TableHeader>
               <TableBody>
                 {items.map((it, i) => {
-                  const name = it.name || it.productName || 'Producto'
+                  const name = getItemName(it)
                   const qty = Number(it.quantity || 0)
-                  const price = Number(it.price || it.unitPrice || 0)
-                  const sub = Number(it.subtotal || qty * price)
+                  const price = getItemUnitPrice(it)
+                  const sub = Number(it.total || it.subtotal || qty * price)
                   return (
                     <TableRow key={i}>
                       <TableCell className="text-sm">{name}</TableCell>
@@ -342,6 +363,12 @@ function SaleDetail({ sale }: { sale: Sale }) {
           <span className="text-muted-foreground">Subtotal</span>
           <span className="font-medium">{formatCurrency(sale.subtotal || 0)}</span>
         </div>
+        {sale.discount ? (
+          <div className="flex justify-between">
+            <span className="text-muted-foreground">Descuento</span>
+            <span className="font-medium">-{formatCurrency(sale.discount)}</span>
+          </div>
+        ) : null}
         <div className="flex justify-between">
           <span className="text-muted-foreground">Impuesto (IGV)</span>
           <span className="font-medium">{formatCurrency(sale.tax || sale.igv || 0)}</span>
